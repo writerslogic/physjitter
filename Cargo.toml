@@ -1,0 +1,28 @@
+[package]
+name = "physjitter"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Proof-of-process primitive using timing jitter for human authorship verification"
+repository = "https://github.com/writerslogic/physjitter"
+keywords = ["cryptography", "authentication", "timing", "entropy", "authorship"]
+categories = ["cryptography", "authentication"]
+readme = "README.md"
+
+[dependencies]
+hmac = "0.12"
+sha2 = "0.10"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+rand = { version = "0.8", optional = true }
+
+[dev-dependencies]
+rand = "0.8"
+
+[features]
+default = []
+# Enable hardware entropy collection (TSC, etc.)
+hardware = []
+# Enable random secret generation
+rand = ["dep:rand"]

@@ -1,0 +1,97 @@
+//! Pure HMAC-based jitter engine (economic security model).
+//!
+//! Provides deterministic jitter computation using only cryptographic primitives.
+//! Security relies on economic cost of retyping content identically.
+
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
+
+use crate::{Jitter, JitterEngine, PhysHash};
+
+type HmacSha256 = Hmac<Sha256>;
+
+/// Pure jitter engine using HMAC for deterministic delay computation.
+///
+/// Security model: Economic - attacker would need to retype content
+/// character-by-character to reproduce the jitter sequence.
+#[derive(Debug, Clone)]
+pub struct PureJitter {
+    /// Minimum jitter delay in microseconds.
+    pub jmin: u32,
+    /// Range for jitter variation in microseconds.
+    pub range: u32,
+}
+
+impl Default for PureJitter {
+    fn default() -> Self {
+        Self {
+            jmin: 500,    // 500μs minimum
+            range: 2500,  // Up to 3000μs total
+        }
+    }
+}
+
+impl PureJitter {
+    /// Create with custom parameters.
+    pub fn new(jmin: u32, range: u32) -> Self {
+        Self { jmin, range }
+    }
+}
+
+impl JitterEngine for PureJitter {
+    fn compute_jitter(&self, secret: &[u8; 32], inputs: &[u8], _entropy: PhysHash) -> Jitter {
+        let mut mac = HmacSha256::new_from_slice(secret)
+            .expect("HMAC accepts any key size");
+        mac.update(inputs);
+        let result = mac.finalize().into_bytes();
+
+        // Extract 4 bytes for jitter computation
+        let hash_val = u32::from_be_bytes([result[0], result[1], result[2], result[3]]);
+        self.jmin + (hash_val % self.range)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_deterministic_jitter() {
+        let engine = PureJitter::default();
+        let secret = [0u8; 32];
+        let inputs = b"hello world";
+        let entropy = [0u8; 32];
+
+        let j1 = engine.compute_jitter(&secret, inputs, entropy);
+        let j2 = engine.compute_jitter(&secret, inputs, entropy);
+
+        assert_eq!(j1, j2, "Same inputs should produce same jitter");
+    }
+
+    #[test]
+    fn test_jitter_range() {
+        let engine = PureJitter::new(500, 2500);
+        let secret = [42u8; 32];
+        let entropy = [0u8; 32];
+
+        for i in 0..100 {
+            let inputs = format!("test input {}", i);
+            let jitter = engine.compute_jitter(&secret, inputs.as_bytes(), entropy);
+            assert!(jitter >= 500, "Jitter should be >= jmin");
+            assert!(jitter < 3000, "Jitter should be < jmin + range");
+        }
+    }
+
+    #[test]
+    fn test_different_inputs_different_jitter() {
+        let engine = PureJitter::default();
+        let secret = [1u8; 32];
+        let entropy = [0u8; 32];
+
+        let j1 = engine.compute_jitter(&secret, b"input a", entropy);
+        let j2 = engine.compute_jitter(&secret, b"input b", entropy);
+
+        // Statistically should be different (collision unlikely)
+        assert_ne!(j1, j2);
+    }
+}
