@@ -1,5 +1,8 @@
 //! Serializable evidence types for proof-of-process records.
 
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
+
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
@@ -17,6 +20,9 @@ pub enum Evidence {
         jitter: Jitter,
         /// Timestamp of capture (Unix micros).
         timestamp_us: u64,
+        /// Sequence number within the chain (monotonically increasing).
+        #[serde(default)]
+        sequence: u64,
     },
     /// Pure HMAC-based evidence (economic security).
     Pure {
@@ -24,30 +30,75 @@ pub enum Evidence {
         jitter: Jitter,
         /// Timestamp of capture (Unix micros).
         timestamp_us: u64,
+        /// Sequence number within the chain (monotonically increasing).
+        #[serde(default)]
+        sequence: u64,
     },
 }
 
 impl Evidence {
-    /// Create physics-bound evidence.
+    /// Create physics-bound evidence with sequence number.
+    ///
+    /// The sequence number should be set by the EvidenceChain when appending.
+    /// When creating evidence directly, pass 0 and let the chain assign the correct sequence.
+    #[cfg(feature = "std")]
     pub fn phys(phys_hash: PhysHash, jitter: Jitter) -> Self {
         Self::Phys {
             phys_hash,
             jitter,
             timestamp_us: current_timestamp_us(),
+            sequence: 0,
         }
     }
 
-    /// Create pure HMAC evidence.
+    /// Create pure HMAC evidence with sequence number.
+    ///
+    /// The sequence number should be set by the EvidenceChain when appending.
+    /// When creating evidence directly, pass 0 and let the chain assign the correct sequence.
+    #[cfg(feature = "std")]
     pub fn pure(jitter: Jitter) -> Self {
         Self::Pure {
             jitter,
             timestamp_us: current_timestamp_us(),
+            sequence: 0,
+        }
+    }
+
+    /// Create pure HMAC evidence with explicit timestamp (for no_std environments).
+    ///
+    /// Use this when you need to provide a timestamp from an external source.
+    pub fn pure_with_timestamp(jitter: Jitter, timestamp_us: u64) -> Self {
+        Self::Pure {
+            jitter,
+            timestamp_us,
+            sequence: 0,
+        }
+    }
+
+    /// Create physics-bound evidence with explicit timestamp (for no_std environments).
+    ///
+    /// Use this when you need to provide a timestamp from an external source.
+    pub fn phys_with_timestamp(phys_hash: PhysHash, jitter: Jitter, timestamp_us: u64) -> Self {
+        Self::Phys {
+            phys_hash,
+            jitter,
+            timestamp_us,
+            sequence: 0,
+        }
+    }
+
+    /// Get the sequence number.
+    pub fn sequence(&self) -> u64 {
+        match self {
+            Evidence::Phys { sequence, .. } => *sequence,
+            Evidence::Pure { sequence, .. } => *sequence,
         }
     }
 
     /// Update hasher with binary representation of evidence.
     ///
     /// Provides a stable, canonical representation for cryptographic hashing.
+    /// Includes sequence number for tamper detection.
     pub fn hash_into(&self, hasher: &mut sha2::Sha256) {
         use sha2::Digest;
         match self {
@@ -55,20 +106,24 @@ impl Evidence {
                 phys_hash,
                 jitter,
                 timestamp_us,
+                sequence,
             } => {
                 hasher.update([0u8]); // Type tag
                 hasher.update(phys_hash.hash);
                 hasher.update([phys_hash.entropy_bits]);
                 hasher.update(jitter.to_le_bytes());
                 hasher.update(timestamp_us.to_le_bytes());
+                hasher.update(sequence.to_le_bytes());
             }
             Evidence::Pure {
                 jitter,
                 timestamp_us,
+                sequence,
             } => {
                 hasher.update([1u8]); // Type tag
                 hasher.update(jitter.to_le_bytes());
                 hasher.update(timestamp_us.to_le_bytes());
+                hasher.update(sequence.to_le_bytes());
             }
         }
     }
@@ -76,6 +131,7 @@ impl Evidence {
     /// Update HMAC with binary representation of evidence.
     ///
     /// Provides a stable, canonical representation for keyed MAC computation.
+    /// Includes sequence number for tamper detection.
     pub fn hash_into_mac(&self, mac: &mut hmac::Hmac<sha2::Sha256>) {
         use hmac::Mac;
         match self {
@@ -83,20 +139,24 @@ impl Evidence {
                 phys_hash,
                 jitter,
                 timestamp_us,
+                sequence,
             } => {
                 mac.update(&[0u8]); // Type tag
                 mac.update(&phys_hash.hash);
                 mac.update(&[phys_hash.entropy_bits]);
                 mac.update(&jitter.to_le_bytes());
                 mac.update(&timestamp_us.to_le_bytes());
+                mac.update(&sequence.to_le_bytes());
             }
             Evidence::Pure {
                 jitter,
                 timestamp_us,
+                sequence,
             } => {
                 mac.update(&[1u8]); // Type tag
                 mac.update(&jitter.to_le_bytes());
                 mac.update(&timestamp_us.to_le_bytes());
+                mac.update(&sequence.to_le_bytes());
             }
         }
     }
@@ -136,7 +196,9 @@ impl Evidence {
     ) -> bool {
         use subtle::ConstantTimeEq;
         match self {
-            Evidence::Phys { phys_hash, jitter, .. } => {
+            Evidence::Phys {
+                phys_hash, jitter, ..
+            } => {
                 let recomputed = engine.compute_jitter(secret, inputs, *phys_hash);
                 recomputed.to_le_bytes().ct_eq(&jitter.to_le_bytes()).into()
             }
@@ -157,6 +219,9 @@ pub struct EvidenceChain {
     pub records: Vec<Evidence>,
     /// HMAC of the chain for tamper detection (keyed with session secret).
     pub chain_mac: [u8; 32],
+    /// Next sequence number for evidence records.
+    #[serde(default)]
+    next_sequence: u64,
     /// Session secret for HMAC (not serialized).
     #[serde(skip)]
     secret: Option<Zeroizing<[u8; 32]>>,
@@ -185,6 +250,7 @@ impl EvidenceChain {
             version: 1,
             records: Vec::new(),
             chain_mac: [0u8; 32],
+            next_sequence: 0,
             secret: None,
         }
     }
@@ -195,21 +261,32 @@ impl EvidenceChain {
             version: 1,
             records: Vec::new(),
             chain_mac: [0u8; 32],
+            next_sequence: 0,
             secret: Some(Zeroizing::new(secret)),
         }
     }
 
     /// Append evidence and update chain MAC.
-    pub fn append(&mut self, evidence: Evidence) {
+    ///
+    /// The sequence number is automatically assigned based on the chain's
+    /// internal counter, ensuring monotonically increasing sequence numbers.
+    pub fn append(&mut self, mut evidence: Evidence) {
         use hmac::{Hmac, Mac};
         use sha2::Sha256;
 
         type HmacSha256 = Hmac<Sha256>;
 
+        // Set sequence number before hashing
+        match &mut evidence {
+            Evidence::Phys { sequence, .. } => *sequence = self.next_sequence,
+            Evidence::Pure { sequence, .. } => *sequence = self.next_sequence,
+        }
+        self.next_sequence += 1;
+
         if let Some(secret) = &self.secret {
             // Keyed MAC for tamper evidence
-            let mut mac = HmacSha256::new_from_slice(secret.as_ref())
-                .expect("HMAC accepts any key size");
+            let mut mac =
+                HmacSha256::new_from_slice(secret.as_ref()).expect("HMAC accepts any key size");
             mac.update(&self.chain_mac);
             evidence.hash_into_mac(&mut mac);
             let result = mac.finalize().into_bytes();
@@ -231,6 +308,10 @@ impl EvidenceChain {
     ///
     /// Recomputes the HMAC from all records and compares it to the stored chain_mac.
     /// Uses constant-time comparison to prevent timing attacks.
+    ///
+    /// **Note**: Empty chains (with no records) will verify successfully with any secret,
+    /// as both the computed and stored MACs are initialized to zeros. Applications should
+    /// check `!chain.records.is_empty()` if this behavior is undesirable.
     pub fn verify_integrity(&self, secret: &[u8; 32]) -> bool {
         use hmac::{Hmac, Mac};
         use sha2::Sha256;
@@ -250,6 +331,31 @@ impl EvidenceChain {
 
         // Constant-time comparison
         expected_mac.ct_eq(&self.chain_mac).into()
+    }
+
+    /// Validate that timestamps are monotonically increasing.
+    ///
+    /// Returns `true` if all timestamps are in non-decreasing order,
+    /// `false` if any timestamp goes backwards (potential manipulation).
+    ///
+    /// An empty chain or single-record chain is considered valid.
+    pub fn validate_timestamps(&self) -> bool {
+        self.records
+            .windows(2)
+            .all(|w| w[0].timestamp_us() <= w[1].timestamp_us())
+    }
+
+    /// Validate sequence numbers are correct (0, 1, 2, ...).
+    ///
+    /// Returns `true` if all sequence numbers match their position in the chain,
+    /// `false` if any sequence number is out of order (potential manipulation).
+    ///
+    /// An empty chain is considered valid.
+    pub fn validate_sequences(&self) -> bool {
+        self.records
+            .iter()
+            .enumerate()
+            .all(|(i, e)| e.sequence() == i as u64)
     }
 
     /// Get count of physics-bound records.
@@ -291,7 +397,19 @@ impl EvidenceChain {
     }
 }
 
-/// Get current timestamp in microseconds.
+/// Get current timestamp in microseconds since Unix epoch.
+///
+/// # Returns
+///
+/// Microseconds since 1970-01-01 00:00:00 UTC.
+/// Returns 0 if the system clock is set before the Unix epoch
+/// (which should not occur on properly configured systems).
+///
+/// # Note
+///
+/// The returned `u64` can represent timestamps until approximately
+/// year 586,912 CE, so overflow is not a practical concern.
+#[cfg(feature = "std")]
 fn current_timestamp_us() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
@@ -300,7 +418,7 @@ fn current_timestamp_us() -> u64 {
         .unwrap_or(0)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
     use crate::JitterEngine;
@@ -395,16 +513,19 @@ mod tests {
             phys_hash: hash,
             jitter: 1000,
             timestamp_us: 100,
+            sequence: 0,
         };
         let p2 = Evidence::Phys {
             phys_hash: hash,
             jitter: 1000,
             timestamp_us: 100,
+            sequence: 0,
         };
         let p3 = Evidence::Phys {
             phys_hash: hash,
             jitter: 2000,
             timestamp_us: 100,
+            sequence: 0,
         };
         assert_eq!(p1, p2);
         assert_ne!(p1, p3);
@@ -413,10 +534,12 @@ mod tests {
         let pure1 = Evidence::Pure {
             jitter: 1500,
             timestamp_us: 200,
+            sequence: 0,
         };
         let pure2 = Evidence::Pure {
             jitter: 1500,
             timestamp_us: 200,
+            sequence: 0,
         };
         assert_eq!(pure1, pure2);
     }
@@ -491,6 +614,7 @@ mod tests {
         unkeyed_chain.append(Evidence::Pure {
             jitter: 1000,
             timestamp_us: keyed_chain.records[0].timestamp_us(),
+            sequence: 0,
         });
 
         // MACs should differ (keyed vs unkeyed)
@@ -545,6 +669,7 @@ mod tests {
         let evidence = Evidence::Pure {
             jitter: 1000,
             timestamp_us: 12345,
+            sequence: 0,
         };
         chain1.append(evidence.clone());
         chain2.append(evidence);
@@ -559,5 +684,151 @@ mod tests {
         // Each should fail with the other's secret
         assert!(!chain1.verify_integrity(&secret2));
         assert!(!chain2.verify_integrity(&secret1));
+    }
+
+    #[test]
+    fn test_sequence_number_assignment() {
+        let mut chain = EvidenceChain::new();
+
+        chain.append(Evidence::pure(1000));
+        chain.append(Evidence::phys([1u8; 32].into(), 1500));
+        chain.append(Evidence::pure(2000));
+
+        // Check that sequence numbers are correctly assigned
+        assert_eq!(chain.records[0].sequence(), 0);
+        assert_eq!(chain.records[1].sequence(), 1);
+        assert_eq!(chain.records[2].sequence(), 2);
+    }
+
+    #[test]
+    fn test_validate_sequences_valid() {
+        let mut chain = EvidenceChain::new();
+
+        chain.append(Evidence::pure(1000));
+        chain.append(Evidence::phys([1u8; 32].into(), 1500));
+        chain.append(Evidence::pure(2000));
+
+        assert!(chain.validate_sequences());
+    }
+
+    #[test]
+    fn test_validate_sequences_invalid() {
+        let mut chain = EvidenceChain::new();
+
+        chain.append(Evidence::pure(1000));
+        chain.append(Evidence::pure(1500));
+        chain.append(Evidence::pure(2000));
+
+        // Tamper with sequence number
+        if let Some(Evidence::Pure { sequence, .. }) = chain.records.get_mut(1) {
+            *sequence = 99; // Wrong sequence
+        }
+
+        assert!(!chain.validate_sequences());
+    }
+
+    #[test]
+    fn test_validate_sequences_empty_chain() {
+        let chain = EvidenceChain::new();
+        assert!(chain.validate_sequences());
+    }
+
+    #[test]
+    fn test_validate_timestamps_valid() {
+        let secret = [42u8; 32];
+        let mut chain = EvidenceChain::with_secret(secret);
+
+        // Add records with increasing timestamps
+        chain.append(Evidence::pure(1000));
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        chain.append(Evidence::pure(1500));
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        chain.append(Evidence::pure(2000));
+
+        assert!(chain.validate_timestamps());
+    }
+
+    #[test]
+    fn test_validate_timestamps_invalid() {
+        let mut chain = EvidenceChain::new();
+
+        // Create evidence with manually set timestamps in wrong order
+        chain.append(Evidence::Pure {
+            jitter: 1000,
+            timestamp_us: 300,
+            sequence: 0,
+        });
+        chain.append(Evidence::Pure {
+            jitter: 1500,
+            timestamp_us: 100, // Earlier than previous - manipulation!
+            sequence: 0,
+        });
+
+        // Note: The chain's append() will override sequence, but not timestamp
+        // So we need to directly manipulate after appending
+        if let Some(Evidence::Pure { timestamp_us, .. }) = chain.records.get_mut(1) {
+            *timestamp_us = 100; // Set to earlier timestamp
+        }
+
+        assert!(!chain.validate_timestamps());
+    }
+
+    #[test]
+    fn test_validate_timestamps_empty_chain() {
+        let chain = EvidenceChain::new();
+        assert!(chain.validate_timestamps());
+    }
+
+    #[test]
+    fn test_validate_timestamps_single_record() {
+        let mut chain = EvidenceChain::new();
+        chain.append(Evidence::pure(1000));
+        assert!(chain.validate_timestamps());
+    }
+
+    #[test]
+    fn test_sequence_tamper_detection() {
+        let secret = [42u8; 32];
+        let mut chain = EvidenceChain::with_secret(secret);
+
+        chain.append(Evidence::pure(1000));
+        chain.append(Evidence::pure(1500));
+        chain.append(Evidence::pure(2000));
+
+        // Verify original chain
+        assert!(chain.verify_integrity(&secret));
+        assert!(chain.validate_sequences());
+
+        // Tamper with sequence number
+        if let Some(Evidence::Pure { sequence, .. }) = chain.records.get_mut(1) {
+            *sequence = 5; // Wrong sequence
+        }
+
+        // Should fail both validations
+        assert!(!chain.verify_integrity(&secret));
+        assert!(!chain.validate_sequences());
+    }
+
+    #[test]
+    fn test_sequence_serialization_roundtrip() {
+        let secret = [42u8; 32];
+        let mut chain = EvidenceChain::with_secret(secret);
+
+        chain.append(Evidence::pure(1000));
+        chain.append(Evidence::phys([1u8; 32].into(), 1500));
+        chain.append(Evidence::pure(2000));
+
+        // Serialize and deserialize
+        let json = serde_json::to_string(&chain).unwrap();
+        let deserialized: EvidenceChain = serde_json::from_str(&json).unwrap();
+
+        // Check sequence numbers are preserved
+        assert_eq!(deserialized.records[0].sequence(), 0);
+        assert_eq!(deserialized.records[1].sequence(), 1);
+        assert_eq!(deserialized.records[2].sequence(), 2);
+
+        // Deserialized chain should still validate
+        assert!(deserialized.verify_integrity(&secret));
+        assert!(deserialized.validate_sequences());
     }
 }

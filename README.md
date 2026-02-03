@@ -734,6 +734,33 @@ cargo test --all-features
 cargo test --no-default-features
 ```
 
+### Fuzzing
+
+This crate includes fuzzing targets using `cargo-fuzz` to find edge cases and potential bugs:
+
+| Target | Description |
+|--------|-------------|
+| `fuzz_evidence_json` | JSON deserialization of Evidence and EvidenceChain |
+| `fuzz_human_model` | HumanModel validation with arbitrary jitter/IKI values |
+| `fuzz_evidence_verify` | Evidence verification and chain integrity |
+| `fuzz_jitter_compute` | Jitter computation with various parameters |
+
+```bash
+# Install cargo-fuzz (requires nightly)
+cargo install cargo-fuzz
+
+# Run a specific fuzz target
+cargo +nightly fuzz run fuzz_evidence_json
+
+# Run with a time limit (60 seconds)
+cargo +nightly fuzz run fuzz_human_model -- -max_total_time=60
+
+# Run all fuzz targets briefly
+for target in fuzz_evidence_json fuzz_human_model fuzz_evidence_verify fuzz_jitter_compute; do
+  cargo +nightly fuzz run $target -- -max_total_time=10
+done
+```
+
 ---
 
 ## FAQ

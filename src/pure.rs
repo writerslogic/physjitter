@@ -25,8 +25,8 @@ pub struct PureJitter {
 impl Default for PureJitter {
     fn default() -> Self {
         Self {
-            jmin: 500,    // 500μs minimum
-            range: 2500,  // Up to 3000μs total
+            jmin: 500,   // 500μs minimum
+            range: 2500, // Up to 3000μs total
         }
     }
 }
@@ -53,8 +53,7 @@ impl PureJitter {
 
 impl JitterEngine for PureJitter {
     fn compute_jitter(&self, secret: &[u8; 32], inputs: &[u8], _entropy: PhysHash) -> Jitter {
-        let mut mac = HmacSha256::new_from_slice(secret)
-            .expect("HMAC accepts any key size");
+        let mut mac = HmacSha256::new_from_slice(secret).expect("HMAC accepts any key size");
         mac.update(b"physjitter/v1/jitter"); // Domain separation
         mac.update(inputs);
         let result = mac.finalize().into_bytes();

@@ -3,7 +3,24 @@
 //! Based on the Aalto 136M keystroke dataset for baseline human
 //! inter-key interval (IKI) distributions.
 
+#[cfg(not(feature = "std"))]
+use alloc::{format, string::String, vec, vec::Vec};
+
 use serde::{Deserialize, Serialize};
+
+/// Platform-independent square root function.
+/// Uses std when available, falls back to libm for no_std.
+#[inline]
+fn sqrt(x: f64) -> f64 {
+    #[cfg(feature = "std")]
+    {
+        x.sqrt()
+    }
+    #[cfg(not(feature = "std"))]
+    {
+        libm::sqrt(x)
+    }
+}
 
 use crate::Jitter;
 
@@ -56,14 +73,14 @@ impl Default for HumanModel {
     fn default() -> Self {
         // Based on Aalto 136M keystroke dataset analysis
         Self {
-            iki_min_us: 30_000,       // 30ms minimum (very fast typist)
-            iki_max_us: 2_000_000,    // 2s maximum (thinking pause)
-            iki_mean_us: 200_000,     // 200ms mean
-            iki_std_us: 80_000,       // 80ms std dev
-            jitter_min_us: 500,       // Matches compute_jitter output minimum
-            jitter_max_us: 3000,      // Matches compute_jitter output maximum
-            min_sequence_length: 20,  // Minimum keystrokes for validation
-            max_perfect_ratio: 0.05,  // Max 5% can be "perfect" timing
+            iki_min_us: 30_000,      // 30ms minimum (very fast typist)
+            iki_max_us: 2_000_000,   // 2s maximum (thinking pause)
+            iki_mean_us: 200_000,    // 200ms mean
+            iki_std_us: 80_000,      // 80ms std dev
+            jitter_min_us: 500,      // Matches compute_jitter output minimum
+            jitter_max_us: 3000,     // Matches compute_jitter output maximum
+            min_sequence_length: 20, // Minimum keystrokes for validation
+            max_perfect_ratio: 0.05, // Max 5% can be "perfect" timing
         }
     }
 }
@@ -124,17 +141,20 @@ pub struct SequenceStats {
 
 impl HumanModel {
     /// Load baseline model from embedded JSON (Aalto 136M keystroke dataset).
+    #[cfg(feature = "std")]
     pub fn baseline() -> Self {
         const BASELINE: &str = include_str!("baseline.json");
         serde_json::from_str(BASELINE).expect("embedded baseline is valid")
     }
 
     /// Load model from JSON string.
+    #[cfg(feature = "std")]
     pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
         serde_json::from_str(json)
     }
 
     /// Serialize model to JSON string.
+    #[cfg(feature = "std")]
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string_pretty(self)
     }
@@ -249,7 +269,7 @@ impl HumanModel {
             .sum::<f64>()
             / count as f64;
 
-        let std_dev = variance.sqrt();
+        let std_dev = sqrt(variance);
         let min = *jitters.iter().min().unwrap_or(&0);
         let max = *jitters.iter().max().unwrap_or(&0);
 
@@ -264,10 +284,7 @@ impl HumanModel {
 
     /// Count consecutive identical values (perfect timing).
     fn count_perfect_timing(&self, jitters: &[Jitter]) -> usize {
-        jitters
-            .windows(2)
-            .filter(|w| w[0] == w[1])
-            .count()
+        jitters.windows(2).filter(|w| w[0] == w[1]).count()
     }
 
     /// Detect repeating patterns in jitter sequence.
@@ -296,7 +313,9 @@ impl HumanModel {
             }
 
             // If >80% match the pattern, it's suspicious
-            if checks > MIN_PATTERN_CHECKS && matches as f64 / checks as f64 > REPEATING_PATTERN_THRESHOLD {
+            if checks > MIN_PATTERN_CHECKS
+                && matches as f64 / checks as f64 > REPEATING_PATTERN_THRESHOLD
+            {
                 return Some(pattern_len);
             }
         }
@@ -387,7 +406,10 @@ impl HumanModel {
             anomalies.push(Anomaly {
                 kind: AnomalyKind::PerfectTiming,
                 position: 0,
-                detail: format!("Too many perfect IKI timings: {:.1}%", perfect_ratio * 100.0),
+                detail: format!(
+                    "Too many perfect IKI timings: {:.1}%",
+                    perfect_ratio * 100.0
+                ),
             });
         }
 
@@ -412,7 +434,7 @@ impl HumanModel {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
 
@@ -421,9 +443,7 @@ mod tests {
         let model = HumanModel::default();
 
         // Simulate human-like jitter (varied values)
-        let human_jitters: Vec<Jitter> = (0..50)
-            .map(|i| 500 + ((i * 37) % 2500) as u32)
-            .collect();
+        let human_jitters: Vec<Jitter> = (0..50).map(|i| 500 + ((i * 37) % 2500) as u32).collect();
 
         let result = model.validate(&human_jitters);
         assert!(result.confidence > 0.5);
@@ -438,7 +458,10 @@ mod tests {
 
         let result = model.validate(&automated_jitters);
         assert!(!result.is_human);
-        assert!(result.anomalies.iter().any(|a| matches!(a.kind, AnomalyKind::LowVariance)));
+        assert!(result
+            .anomalies
+            .iter()
+            .any(|a| matches!(a.kind, AnomalyKind::LowVariance)));
     }
 
     #[test]
@@ -446,12 +469,13 @@ mod tests {
         let model = HumanModel::default();
 
         // Repeating pattern
-        let pattern_jitters: Vec<Jitter> = (0..50)
-            .map(|i| [1000, 1500, 2000][i % 3])
-            .collect();
+        let pattern_jitters: Vec<Jitter> = (0..50).map(|i| [1000, 1500, 2000][i % 3]).collect();
 
         let result = model.validate(&pattern_jitters);
-        assert!(result.anomalies.iter().any(|a| matches!(a.kind, AnomalyKind::RepeatingPattern)));
+        assert!(result
+            .anomalies
+            .iter()
+            .any(|a| matches!(a.kind, AnomalyKind::RepeatingPattern)));
     }
 
     #[test]
@@ -484,7 +508,10 @@ mod tests {
 
         let result = model.validate_iki(&automated_iki);
         assert!(!result.is_human);
-        assert!(result.anomalies.iter().any(|a| matches!(a.kind, AnomalyKind::LowVariance)));
+        assert!(result
+            .anomalies
+            .iter()
+            .any(|a| matches!(a.kind, AnomalyKind::LowVariance)));
     }
 
     #[test]
@@ -498,7 +525,10 @@ mod tests {
 
         let result = model.validate_iki(&fast_iki);
         assert!(!result.is_human);
-        assert!(result.anomalies.iter().any(|a| matches!(a.kind, AnomalyKind::OutOfRange)));
+        assert!(result
+            .anomalies
+            .iter()
+            .any(|a| matches!(a.kind, AnomalyKind::OutOfRange)));
     }
 
     #[test]
@@ -511,7 +541,10 @@ mod tests {
         let result = model.validate_iki(&short_iki);
         assert!(!result.is_human);
         assert_eq!(result.confidence, 0.0);
-        assert!(result.anomalies.iter().any(|a| matches!(a.kind, AnomalyKind::DistributionMismatch)));
+        assert!(result
+            .anomalies
+            .iter()
+            .any(|a| matches!(a.kind, AnomalyKind::DistributionMismatch)));
     }
 
     #[test]

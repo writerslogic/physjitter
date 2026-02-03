@@ -319,7 +319,11 @@ mod tests {
 
     #[test]
     fn test_try_with_jitter_range() {
-        assert!(PhysJitter::default().try_with_jitter_range(500, 0).is_none());
-        assert!(PhysJitter::default().try_with_jitter_range(500, 100).is_some());
+        assert!(PhysJitter::default()
+            .try_with_jitter_range(500, 0)
+            .is_none());
+        assert!(PhysJitter::default()
+            .try_with_jitter_range(500, 100)
+            .is_some());
     }
 }
