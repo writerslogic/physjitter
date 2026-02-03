@@ -1,0 +1,17 @@
+[req]
+default_bits = 256
+prompt = no
+default_md = sha256
+distinguished_name = dn
+
+[dn]
+CN = WritersLogic C2PA Signer
+O = WritersLogic
+C = US
+
+[v3_signer]
+basicConstraints = critical, CA:FALSE
+keyUsage = critical, digitalSignature
+extendedKeyUsage = emailProtection
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always, issuer
